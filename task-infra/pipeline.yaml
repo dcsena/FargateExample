@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  ECR Repository via CodePipeline
+
+Parameters:
+  GitHubToken:
+    Type: String
+    Default: Redacted
+  GitHubOwner:
+    Type: String
+    Default: dcsena
+  ImageTag:
+      Description: ECR image tag
+      Type: String
+      Default: latest
+  ServiceName:
+      Type: String
+      Default: FargateExample
+  ECRRepositoryName:
+      Type: String
+      Default: FargateExample
+
+Resources:
+
+    # CodeBuild project and resources (S3 Bucket for build artifacts, Role, Project)
+    BuildArtifactsBucket:
+        Type: AWS::S3::Bucket
+        DeletionPolicy: Retain
+        Properties:
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - ServerSideEncryptionByDefault:
+                  SSEAlgorithm: AES256
+          Tags: 
+            - Key: "Stack"
+              Value: !Ref AWS::StackName
+            - Key: "Project"
+              Value: !Ref ServiceName
+
+    ECRRepository:
+        Type: AWS::ECR::Repository
+        DeletionPolicy: Retain
+        Properties: 
+          RepositoryName: !Ref ECRRepositoryName
+
+    CloudWatchLogsGroup:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        Properties:
+            LogGroupName: !Ref ServiceName
+            RetentionInDays: 30
+
+    TaskDefinition:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          Family: !Ref ServiceName
+          RequiresCompatibilities:
+            - FARGATE
+          NetworkMode: awsvpc
+          ExecutionRoleArn: !Ref ECSExecutionRole
+          TaskRoleArn: !Ref ECSExecutionRole
+          Cpu: 512
+          Memory: 1024
+          ContainerDefinitions:
+              - Name: !Ref ServiceName
+                Essential: true
+                Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepositoryName}:${ImageTag}
+                Memory: 512
+                LogConfiguration:
+                  LogDriver: awslogs
+                  Options:
+                      awslogs-group: !Ref ServiceName
+                      awslogs-region: !Ref AWS::Region
+                      awslogs-stream-prefix: !Ref ServiceName
+                Environment:
+                  - Name: region
+                    Value: us-east-1
+
+########  ##     ## #### ##       ########  
+##     ## ##     ##  ##  ##       ##     ## 
+##     ## ##     ##  ##  ##       ##     ## 
+########  ##     ##  ##  ##       ##     ## 
+##     ## ##     ##  ##  ##       ##     ## 
+##     ## ##     ##  ##  ##       ##     ## 
+########   #######  #### ######## ########  
+
+    CodeBuildProject:
+        Type: AWS::CodeBuild::Project
+        Properties:
+            Name: !Ref ServiceName
+            Description: Build project for the Service
+            Artifacts:
+              Type: CODEPIPELINE
+            Environment: 
+                Type: LINUX_CONTAINER
+                ComputeType: BUILD_GENERAL1_SMALL
+                Image: aws/codebuild/standard:5.0
+                PrivilegedMode: true
+                EnvironmentVariables:
+                  - Name: AWS_DEFAULT_REGION
+                    Value: !Ref AWS::Region
+                  - Name: AWS_ACCOUNT_ID
+                    Value: !Ref AWS::AccountId
+                  - Name: BUILD_OUTPUT_BUCKET
+                    Value: !Ref BuildArtifactsBucket
+                  - Name: IMAGE_REPO_NAME
+                    Value: !Ref ECRRepositoryName
+            Cache:
+              Type: S3
+              Location: !Sub ${BuildArtifactsBucket}/codebuild-cache
+            ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+            Source: 
+                Type: CODEPIPELINE
+            Tags: 
+              - Key: "Stack"
+                Value: !Ref AWS::StackName
+              - Key: "Project"
+                Value: !Ref ServiceName
+
+########  #### ########  ######## ##       #### ##    ## ######## 
+##     ##  ##  ##     ## ##       ##        ##  ###   ## ##       
+##     ##  ##  ##     ## ##       ##        ##  ####  ## ##       
+########   ##  ########  ######   ##        ##  ## ## ## ######   
+##         ##  ##        ##       ##        ##  ##  #### ##       
+##         ##  ##        ##       ##        ##  ##   ### ##       
+##        #### ##        ######## ######## #### ##    ## ######## 
+
+    Pipeline:
+        Type: AWS::CodePipeline::Pipeline
+        Properties:
+            ArtifactStore: 
+                Location: !Ref BuildArtifactsBucket
+                Type: S3
+            Name: !Ref ServiceName
+            RoleArn: !GetAtt CodePipelineExecutionRole.Arn
+            Stages:
+                - Name: Source
+                  Actions:
+                    - Name: SourceCodeRepo
+                      ActionTypeId:
+                        Category: Source
+                        Owner: ThirdParty
+                        Provider: GitHub
+                        Version: "1"
+                      Configuration:
+                        Owner: !Ref GitHubOwner
+                        Repo: !Ref ServiceName
+                        PollForSourceChanges: 'false'
+                        Branch: master
+                        OAuthToken: !Ref GitHubToken
+                      OutputArtifacts:
+                        - Name: SourceOutput
+                      RunOrder: 1
+                - Name: Build
+                  Actions:
+                    - Name: CodeBuild
+                      ActionTypeId:
+                        Category: Build
+                        Owner: AWS
+                        Provider: CodeBuild
+                        Version: "1"
+                      Configuration:
+                        ProjectName: !Ref CodeBuildProject
+                      InputArtifacts:
+                        - Name: SourceOutput
+                      OutputArtifacts:
+                        - Name: BuildOutput
+
+
+####    ###    ##     ## 
+ ##    ## ##   ###   ### 
+ ##   ##   ##  #### #### 
+ ##  ##     ## ## ### ## 
+ ##  ######### ##     ## 
+ ##  ##     ## ##     ## 
+#### ##     ## ##     ## 
+
+    CodeBuildServiceRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                  - Action: 
+                      - 'sts:AssumeRole'
+                    Effect: Allow
+                    Principal:
+                      Service:
+                        - codebuild.amazonaws.com
+            Path: /
+            Policies:
+                - PolicyName: CodeBuildLogs
+                  PolicyDocument:
+                    Version: '2012-10-17'
+                    Statement:
+                      - 
+                        Effect: Allow
+                        Action:
+                          - 'logs:CreateLogGroup'
+                          - 'logs:CreateLogStream'
+                          - 'logs:PutLogEvents'
+                        Resource:
+                          - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ServiceName}'
+                          - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ServiceName}:*'
+                - PolicyName: CodeBuildArtifactsBucket
+                  PolicyDocument:
+                    Version: '2012-10-17'
+                    Statement:
+                      - 
+                        Effect: Allow
+                        Action: 
+                          - 's3:GetObject'
+                          - 's3:GetObjectVersion'
+                          - 's3:PutObject'
+                        Resource:
+                          - !Sub 'arn:aws:s3:::${BuildArtifactsBucket}/*'
+                - PolicyName: root
+                  PolicyDocument:
+                    Version: 2012-10-17
+                    Statement:
+                      - Resource: "*"
+                        Effect: Allow
+                        Action:
+                          - sts:AssumeRole
+                          - ssm:GetParameters
+                          - ecr:GetAuthorizationToken
+                      - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*
+                        Effect: Allow
+                        Action:
+                          - ecr:GetDownloadUrlForLayer
+                          - ecr:BatchGetImage
+                          - ecr:BatchCheckLayerAvailability
+                          - ecr:PutImage
+                          - ecr:InitiateLayerUpload
+                          - ecr:UploadLayerPart
+                          - ecr:CompleteLayerUpload
+
+
+    CloudFormationExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+        Path: /
+        ManagedPolicyArns:
+          - 'arn:aws:iam::aws:policy/AdministratorAccess'
+
+    ECSExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: !Sub "${ServiceName}Role"
+        Path: /
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+              - ecs-tasks.amazonaws.com
+              - events.amazonaws.com
+        ManagedPolicyArns:
+          - 'arn:aws:iam::aws:policy/AdministratorAccess'
+
+    CodePipelineExecutionRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                  - Action: 
+                        - 'sts:AssumeRole'
+                    Effect: Allow
+                    Principal:
+                      Service: 
+                        - codepipeline.amazonaws.com
+            Path: /
+            Policies:
+                - PolicyName: CodePipelineAccess
+                  PolicyDocument:
+                    Version: '2012-10-17'
+                    Statement:
+                        - Effect: Allow
+                          Action:
+                              - 'iam:PassRole'
+                              - 'lambda:InvokeFunction'
+                              - 'lambda:ListFunctions'
+                              - 'lambda:InvokeAsyc'
+                          Resource: '*'
+                - PolicyName: CodePipelineCodeAndArtifactsS3Bucket
+                  PolicyDocument:
+                    Version: '2012-10-17'
+                    Statement:
+                      - Effect: Allow
+                        Action: 's3:*'
+                        Resource: !Sub 'arn:aws:s3:::${BuildArtifactsBucket}/*'
+
+                - PolicyName: CodePipelineCodeBuildAndCloudformationAccess
+                  PolicyDocument:
+                    Version: '2012-10-17'
+                    Statement:
+                      - Effect: Allow
+                        Action: 
+                          - 'codebuild:StartBuild'
+                          - 'codebuild:BatchGetBuilds'
+                        Resource: 
+                          - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeBuildProject}'
+                      - Effect: Allow
+                        Action: 
+                          - 'cloudformation:CreateStack'
+                          - 'cloudformation:DescribeStacks'
+                          - 'cloudformation:DeleteStack'
+                          - 'cloudformation:UpdateStack'
+                          - 'cloudformation:CreateChangeSet'
+                          - 'cloudformation:ExecuteChangeSet'
+                          - 'cloudformation:DeleteChangeSet'
+                          - 'cloudformation:DescribeChangeSet'
+                          - 'cloudformation:SetStackPolicy'
+                          - 'cloudformation:SetStackPolicy'
+                          - 'cloudformation:ValidateTemplate'
+                        Resource: 
+                          - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ServiceName}*/*'
+                          - !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+
+    GithubWebhook:
+      Type: AWS::CodePipeline::Webhook
+      Properties:
+        Authentication: GITHUB_HMAC
+        AuthenticationConfiguration:
+          SecretToken: !Ref GitHubToken
+        RegisterWithThirdParty: 'true'
+        Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+        TargetPipeline: !Ref Pipeline
+        TargetAction: SourceCodeRepo
+        TargetPipelineVersion: !GetAtt Pipeline.Version
+
+
+Outputs:
+
+    BuildArtifactS3Bucket:
+      Description: Amazon S3 Bucket for Pipeline and Build artifacts
+      Value: !Ref BuildArtifactsBucket
+
+    CodeBuildProject:
+      Description: CodeBuild Project name
+      Value: !Ref CodeBuildProject
+
+    CodePipeline:
+      Description: AWS CodePipeline pipeline name
+      Value: !Ref Pipeline
+
+    CodeBuildIAMRole:
+      Description: CodeBuild IAM Role
+      Value: !GetAtt CodeBuildServiceRole.Arn
+
+    CloudformationIAMRole:
+      Description: Cloudformation IAM Role
+      Value: !GetAtt CloudFormationExecutionRole.Arn
+
+    CodePipelineIAMRole:
+      Description: CodePipeline IAM Role
+      Value: !GetAtt CodePipelineExecutionRole.Arn

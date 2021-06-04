@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+    FargateExampleAPI Template
+
+Parameters:
+    Stage:
+        Type: String
+        Default: Alpha
+    ServiceName:
+        Type: String
+        Default: FargateExampleAPI
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+    Function:
+        Timeout: 30
+
+Conditions:
+    IsAlpha: !Equals [!Ref Stage, 'Alpha']
+    IsProd: !Equals [!Ref Stage, 'Prod']
+
+Resources:
+    FargateExampleAPILambdaRole:
+        Type: AWS::IAM::Role
+        Properties:
+            ManagedPolicyArns:
+              - "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Effect: Allow
+                      Action:
+                          - sts:AssumeRole
+                      Principal:
+                          Service:
+                              - lambda.amazonaws.com
+            Path: /
+    FargateExampleAPILambdaPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+            PolicyName: FargateExampleAPILambdaPolicy
+            Roles:
+                - !Ref FargateExampleAPILambdaRole
+            PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Effect: Allow
+                      Action:
+                          - logs:PutLogEvents
+                          - logs:CreateLogGroup
+                          - logs:CreateLogStream
+                          - sqs:SendMessage
+                          - sqs:ReceiveMessage
+                          - sqs:DeleteMessage
+                          - sqs:GetQueueAttributes
+                          - sns:*
+                          - dynamodb:*
+                          - s3:*
+                          - lambda:InvokeFunction
+                          - cognito-idp:AdminDeleteUser
+                          - ecs:RunTask
+                          - iam:PassRole
+                      Resource: "*"
+    FargateExampleAPIFunction:
+        Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+        DependsOn: FargateExampleAPILambdaPolicy
+        Properties:
+            FunctionName: !Sub "${ServiceName}Lambda${Stage}"
+            Timeout: 30
+            CodeUri: api/
+            Handler: api.lambda_handler
+            Runtime: python3.8
+            Environment: # More info about Env Vars: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#environment-object
+                Variables:
+                    STAGE: !Ref Stage
+            Role: !GetAtt FargateExampleAPILambdaRole.Arn
+            Tracing: Active
+            Events:
+                APIEvent:
+                    Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+                    Properties:
+                        Path: /test
+                        Method: post
+    FargateExampleAPILambdaAlarm:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            AlarmName: !Sub "${ServiceName}Lambda${Stage}Errors"
+            ActionsEnabled:
+                Fn::If:
+                    - IsAlpha
+                    - False
+                    - True
+            AlarmActions:
+                - !Sub "arn:aws:sns:us-east-1:${AWS::AccountId}:ErrorNotification"
+            ComparisonOperator: GreaterThanThreshold
+            DatapointsToAlarm: 1
+            Dimensions:
+                - Name: FunctionName
+                  Value: !Sub "${ServiceName}Lambda${Stage}"
+            EvaluationPeriods: 1
+            MetricName: Errors
+            Namespace: "AWS/Lambda"
+            Period: 300
+            Statistic: Sum
+            Threshold: 0
+            TreatMissingData: missing
+
+Outputs:
+
+    FargateExampleAPIFunction:
+      Description: !Sub "${ServiceName} Function ARN"
+      Value: !GetAtt FargateExampleAPIFunction.Arn
+      Export:
+          Name: !Sub "FargateExampleAPI-FunctionArn${Stage}"
+
+    FargateExampleAPILambdaRole:
+      Description: !Sub "IAM Role created for ${ServiceName} function"
+      Value: !GetAtt FargateExampleAPILambdaRole.Arn
